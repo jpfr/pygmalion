@@ -1,43 +1,37 @@
 import copy
-import inspect
 import operator
 
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from itertools import product as iter_product
-from tabulate import tabulate
-
-from random import random
 from functools import reduce
+from tabulate import tabulate
+from random import random
 
 ##########################
 # Introspected Functions #
 ##########################
 
-# The function objects stored in the factors and passed with the messages need to have additional attributes:
-# - domains: A dict that maps variable names to domains. A domain is a list of all possible values
-# - (argspec: A list of the argument variable names. Is not needed if the function has "proper" named arguments)
-
 # Examples
 # ========
 #
 # ring = Ring(operator.add, 0, operator.mul, operator.truediv, 1)
-
+#
 # def func1(x1, x2):
 #     return x1 * x2
-
-# func1.domains = {'x1':[1,2,3], 'x2':[1,2,3]}
-
+# func1.domains = OrderedDict({'x1':[1,2,3], 'x2':[1,2,3]})
+#
 # def func2(x2, x3):
 #     return x2 * x3
-
-# func2.domains = {'x2':[1,2,3], 'x3':[1,2,3]}
-
-# c = combine(func1, func2, ring)
+# func2.domains = OrderedDict({'x2':[1,2,3], 'x3':[1,2,3]})
+#
+# c = merge(func1, func2, ring)
 # m = marginalize(c, ring, 'x2')
 # e = eliminate(c, ring, 'x3', 1)
+#
 # print(m(2,3))
 # print(get_args(m))
 # print(m.domains)
+# print_func_table(m)
 
 class Ring(object):
     "A commutative semiring, called ring for brevity. \
@@ -50,21 +44,18 @@ class Ring(object):
         self.one = one
 
 def get_args(f):
-    "Return the names of the arguments of a function as a list of strings"
-    if hasattr(f, 'argspec'):
-        return f.argspec[:]
-    return inspect.getargspec(f).args
+    "Return the ordered names of the arguments according to the domain information"
+    return [var for var in f.domains.keys()]
 
 def marginalize(f, ring, var):
     "Marginalize out the given variable according to the addition operator of the \
     ring and the domain of the variable"
-    arg_spec = get_args(f)
-    new_spec = arg_spec[:]
-    new_spec.remove(var)
-    eliminated_pos = arg_spec.index(var)
+    new_domains = f.domains.copy()
+    del new_domains[var]
+    eliminated_pos = get_args(f).index(var)
 
-    results = {}
-    for args in iter_product(*[f.domains[v] for v in new_spec]):
+    results = {} # build a table with all assignment combinations
+    for args in iter_product(*[new_domains[v] for v in new_domains.keys()]):
         expanded_args = list(args)
         expanded_args.insert(eliminated_pos, 'replace me')
         total = ring.zero
@@ -72,57 +63,47 @@ def marginalize(f, ring, var):
             expanded_args[eliminated_pos] = val
             total = ring.add(total, f(*expanded_args))
         results[args] = total
-
     def marginalized(*args):
         return results[args]
 
-    marginalized.argspec = new_spec
-    marginalized.domains = f.domains.copy()
-    del marginalized.domains[var]
+    marginalized.domains = new_domains
     return marginalized
 
 def marginalize_others(f, ring, keep_var):
     "Marginalize out all variables that are not (in) keep_var"
-    if not type(keep_var) is list:
+    if not type(keep_var) == list:
         keep_var = [keep_var]
-    new_func = copy.deepcopy(f)
+    new_func = f
     for arg in get_args(f):
         if not arg in keep_var:
             new_func = marginalize(new_func, ring, arg)
     return new_func
 
-def combine(f1, f2, ring):
+def merge(f1, f2, ring):
     "The functions are merged using the ring's multiplication operator. \
     The new domain is made up of the union of the original domain's variables. \
-    For example: combined(x1, x2, x3) = f1(x1, x2) * f2(x2, x3)"
-    arg_spec1 = get_args(f1)
-    arg_spec2 = get_args(f2)
-    new_spec = arg_spec1[:]
-    for arg in arg_spec2:
-        if not arg in new_spec:
-            new_spec.append(arg)
-    new_domains = {}
-    for arg in new_spec:
-        if arg in arg_spec1:
-            new_domains[arg] = f1.domains[arg]
-        else:
-            new_domains[arg] = f2.domains[arg]
+    It is assumed that the domain per-variable does not change between the functions. \
+    For example: merge(x1, x2, x3) = f1(x1, x2) * f2(x2, x3)"
+    new_domains = f1.domains.copy()
+    new_domains.update(f2.domains.items())
 
     results = {}
-    for args in iter_product(*[new_domains[var] for var in new_spec]):
-        args1 = args[:len(arg_spec1)]
-        args2 = arg_spec2[:]
+    arg_list1 = get_args(f1)
+    arg_list2 = get_args(f2)
+    arg_list_total = list(new_domains.keys())
+    for args in iter_product(*[dom for dom in new_domains.values()]):
+        args1 = args[:len(arg_list1)]
+        args2 = arg_list2[:]
         for i in range(len(args2)):
-            pos = new_spec.index(arg_spec2[i])
+            pos = arg_list_total.index(arg_list2[i])
             args2[i] = args[pos]
         results[args] = ring.mul(f1(*args1), f2(*args2))
 
-    def combined(*args):
+    def merged(*args):
         return results[args]
 
-    combined.argspec = new_spec
-    combined.domains = new_domains
-    return combined
+    merged.domains = new_domains
+    return merged 
 
 def eliminate(f, ring, var, value, normalize=False):
     "Set a variable to a fixed value (e.g. add evidence). \
@@ -130,11 +111,10 @@ def eliminate(f, ring, var, value, normalize=False):
     multiplication operator is available"
     if not var in f.domains:
         return f
+
     new_domains = f.domains.copy()
     del new_domains[var]
-    new_spec = get_args(f)
-    varindex = new_spec.index(var) # at which position is var?
-    new_spec.remove(var)
+    varindex = get_args(f).index(var) # at which position is var?
 
     if normalize:
         var_only = marginalize_others(f, ring, var)
@@ -148,7 +128,6 @@ def eliminate(f, ring, var, value, normalize=False):
         else:
             return result
 
-    eliminated.argspec = new_spec
     eliminated.domains = new_domains
     return eliminated
 
@@ -160,15 +139,15 @@ def print_func_table(f):
 
 def max_assignment(f):
     "Find the argmax on the entire domain of the function by brute force"
-    arg_spec = get_args(f)
+    arg_list = get_args(f)
     ma = None
     mav = float('-inf')
-    for x in iter_product(*[f.domains[x] for x in arg_spec]):
+    for x in iter_product(*[f.domains[x] for x in arg_list]):
         v = f(*x)
         if v > mav:
             ma = x
             mav = v
-    return {arg_spec[i]:ma[i] for i in range(len(arg_spec))}
+    return {arg_list[i]:ma[i] for i in range(len(arg_list))}
 
 ########################
 # Factor Graph Classes #
@@ -287,7 +266,7 @@ class VariableNode(Node):
         for source, m in self.received_messages.items():
             if source == target_node:
                 continue
-            f = combine(f, m.func, ring)
+            f = merge(f, m.func, ring)
         f = marginalize_others(f, self.ring, self.name)
         return Message(self, target_node, f)
 
@@ -299,7 +278,7 @@ class VariableNode(Node):
         for source, m in self.received_messages.items():
             if source == target_node:
                 continue
-            f = combine(f, m.func, ring)
+            f = merge(f, m.func, ring)
         
         ass = self.assignments # assignments are only used for the backwards pass
         for m in self.received_messages.values():
@@ -308,7 +287,7 @@ class VariableNode(Node):
                 f = eliminate(f, self.ring, var, val)
 
         if backwards:
-            f_total = combine(f, self.received_messages[target_node.name].func, self.ring)
+            f_total = merge(f, self.received_messages[target_node.name].func, self.ring)
             for var, val in ass.items():
                 f_total = eliminate(f, self.ring, var, val)
             new_assignments = max_assignment(f_total)
@@ -333,7 +312,7 @@ class VariableNode(Node):
 
         f = self.unity
         for m in self.received_messages.values():
-            f = combine(f, m.func, ring)
+            f = merge(f, m.func, ring)
 
         for m in self.received_messages.values():
             for var, val in m.assignments.items():
@@ -361,7 +340,7 @@ class FactorNode(Node):
         for neighbour in self.neighbours:
             if neighbour == target_node or not self.received_messages[neighbour.name]:
                 continue
-            f = combine(f, self.received_messages[neighbour.name].func, self.ring)
+            f = merge(f, self.received_messages[neighbour.name].func, self.ring)
         f = marginalize_others(f, self.ring, target_node.name)
         return Message(self, target_node, f)
 
@@ -373,7 +352,7 @@ class FactorNode(Node):
         for source, m in self.received_messages.items():
             if source == target_node:
                 continue
-            f = combine(f, m.func, self.ring)
+            f = merge(f, m.func, self.ring)
 
         ass = self.assignments # eliminate the received assignments from f
         for m in self.received_messages.values():
@@ -382,7 +361,7 @@ class FactorNode(Node):
                 f = eliminate(f, self.ring, var, val)
         
         if backwards:
-            f_total = combine(f, self.received_messages[target_node.name].func, self.ring)
+            f_total = merge(f, self.received_messages[target_node.name].func, self.ring)
             for var, val in ass.items():
                 f_total = eliminate(f, self.ring, var, val)
             new_assignments = max_assignment(f_total)
@@ -426,7 +405,7 @@ class FactorGraph(object):
                     fn.remote_neighbours.append(vn)
 
     def factorize(self):
-        return reduce(lambda f1, f2: combine(f1, f2, self.ring), [fn.func for fn in self.factors.values()])
+        return reduce(lambda f1, f2: merge(f1, f2, self.ring), [fn.func for fn in self.factors.values()])
             
 ############
 # Examples #
@@ -455,7 +434,7 @@ def func2(x2, x3):
     return x2 * x3
 func2.domains = {'x2':[1,2,3], 'x3':[1,2,3]}
 
-c = combine(func1, func2, ring)
+c = merge(func1, func2, ring)
 m = marginalize(c, ring, 'x2')
 e = eliminate(c, ring, 'x3', 1)
 
