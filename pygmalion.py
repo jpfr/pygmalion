@@ -87,7 +87,7 @@ def merge(f1, f2, ring):
 
 def eliminate(f, ring, var, value, normalize=False):
     "Set a variable to a fixed value (add evidence). The resuling function \
-    can be normalized if an inverse multiplication operator is available"
+    can be normalized if an inverse multiplication operator is available."
     if not var in f.domain:
         return f
     varindex = arguments(f).index(var) # at which position is var?
@@ -116,17 +116,16 @@ def print_func_table(f):
 ################
 
 class Message(object):
-    def __init__(self, source, destination, func, assignments = {}, variableinfos = {}):
+    def __init__(self, source, destination, func, variableinfos = {}):
         self.source = source
         self.destination = destination
         self.func = func
         self.variableinfos = variableinfos # used only for the split-factor extension
-        self.assignments = assignments     # used only for the split-factor extension
 
     def __repr__(self):
-        return "<Message: %s -> %s,\tDomain: [%s], Assignments: [%s], VariableInfos: [%s]>" % \
+        return "<Message: %s -> %s,\tDomain: [%s], VariableInfos: [%s]>" % \
             (self.source.name, self.destination.name, ",".join(self.func.domain.keys()), \
-             ",".join(self.assignments.keys()), ",".join(self.variableinfos.keys()))
+             ",".join(self.variableinfos.keys()))
 
 class Node(object):
     def send(self, message):
@@ -157,28 +156,43 @@ class Node(object):
         return None
 
 class VariableNode(Node):
-    def __init__(self, name, domain, neighbours=[], remote_neighbours=[]):
+    def __init__(self, name, domain, ring, neighbours=[], remote_neighbours=[]):
         self.name = name
         self.domain = domain
+        self.ring = ring
         self.neighbours = neighbours[:]
         self.remote_neighbours = remote_neighbours[:] # only needed for the split factor extension
-        self.assignments = {} # only used by the split factor extension
         self.received_messages = {}
 
     def __repr__(self):
         return "<VariableNode: %s>" % self.name
+
+    def marginal(self):
+        f = unity(self.ring)
+        for m in self.received_messages.values():
+            f = merge(f, m.func, self.ring)
+        f = marginalize_others(f, self.ring, self.name)
+        return f
 
 class FactorNode(Node):
-    def __init__(self, name, func, neighbours=[], remote_neighbours=[]):
+    def __init__(self, name, func, ring, neighbours=[], remote_neighbours=[]):
         self.name = name
         self.func = func
+        self.ring = ring
         self.neighbours = neighbours[:]
         self.remote_neighbours = remote_neighbours[:] # only used by the split factor extension
-        self.assignments = {} # only used by the split factor extension
         self.received_messages = {}
 
     def __repr__(self):
         return "<VariableNode: %s>" % self.name
+
+    def marginal(self):
+        "The marginal over the domain of the function"
+        f = self.func
+        for m in self.received_messages.values():
+            f = merge(f, m.func, self.ring)
+        f = marginalize_others(f, self.ring, self.func.domain.keys())
+        return f
 
 class FactorGraph(object):
     def __init__(self, ring, variables = {}, factors = {}):
@@ -187,14 +201,14 @@ class FactorGraph(object):
         self.factors = factors
 
     def addVariableNode(self, name, domain, neighbours=[], remote_neighbours=[]):
-        v = VariableNode(name, domain)
+        v = VariableNode(name, domain, self.ring)
         self.variables[name] = v
         self.connect(v, neighbours)
         self.connect(v, remote_neighbours, True)
         return v
 
     def addFactorNode(self, name, func, neighbours=[], remote_neighbours=[]):
-        v = FactorNode(name, func)
+        v = FactorNode(name, func, self.ring)
         self.factors[name] = v
         self.connect(v, neighbours)
         self.connect(v, remote_neighbours, True)
@@ -218,7 +232,7 @@ class FactorGraph(object):
             raise Exception("Cannot create a message to a non-neighbour")
         f = unity(self.ring, OrderedDict([(source.name, source.domain)])) if type(source) == VariableNode else source.func
         for neighbour, m in source.received_messages.items():
-            if neighbour == target:
+            if neighbour == target.name:
                 continue
             f = merge(f, m.func, self.ring)
         f = marginalize_others(f, self.ring, target.name if source.name in self.factors else source.name)
@@ -243,78 +257,64 @@ def find_max(f):
     return {list(f.domain)[i]:ma[i] for i in range(len(args))}
 
 class VariableInfo(object):
-    def __init__(self, name, contained, neighbourcount, counter):
+    def __init__(self, name, contained, neighbourcount, visitcount):
         self.name = name
-        self.contained = contained
-        self.neighbourcount = neighbourcount
-        self.counter = counter
+        self.contained = contained # is the variable contained in the sending subgraph?
+        self.neighbourcount = neighbourcount # neighbours + remote neighbours
+        self.visitcount = visitcount # how many of the neighbours did the message visit?
 
-def updated_variableinfos(source, target_node):
-    "The variable infos for the target node"
-    vis = {}
-    for _, m in source.received_messages.items(): # include also the messages from the target node
+def compute_variableinfos(source, target):
+    "The variableinfos for the target node"
+    variableinfos = {}
+    if target.name in source.received_messages: # backwards pass
+        return variableinfos
+    # variableinfos the source received
+    for sender, m in source.received_messages.items():
         for vi in m.variableinfos.values():
-            if vi.name in vis:
-                vis[vi.name].counter += vi.counter
-                vis[vi.name].contained |= vi.contained
+            if vi.name in variableinfos:
+                variableinfos[vi.name].visitcount += vi.visitcount
+                variableinfos[vi.name].contained |= vi.contained
             else:
-                vis[vi.name] = copy.deepcopy(vi)
+                variableinfos[vi.name] = copy.deepcopy(vi)
+    # update / add variableinfos for the source node
     if type(source) == VariableNode:
         if len(source.remote_neighbours) > 0:
-            if not source.name in vis:
-                vis[source.name] = VariableInfo(source.name, True, len(source.remote_neighbours) + len(source.neighbours), 0)
+            if not source.name in variableinfos:
+                variableinfos[source.name] = VariableInfo(source.name, True, len(source.remote_neighbours) + len(source.neighbours), 0)
             else:
-                vis[source.name].contained = True
+                variableinfos[source.name].contained = True
     else: # if type(source) == FactorNode:
         for n in source.remote_neighbours + source.neighbours:
-            if len(n.remote_neighbours) == 0:
-                continue
-            if not n.name in vis:
-                vis[n.name] = VariableInfo(n.name, False, len(n.remote_neighbours) + len(n.neighbours), 1)
-            else:
-                vis[n.name].counter += 1
-    return vis
+            if len(n.remote_neighbours) > 0:
+                if not n.name in variableinfos:
+                    variableinfos[n.name] = VariableInfo(n.name, False, len(n.remote_neighbours) + len(n.neighbours), 1)
+                else:
+                    variableinfos[n.name].visitcount += 1
+    return dict(filter(lambda x: x[1].neighbourcount > x[1].visitcount, variableinfos.items()))
 
-def reduced_message_domain(source, target_node, variableinfos):
+def extended_message_domain(source, target, variableinfos):
     "The relevant domain of the receiving subgraph"
-    rd = [source.name] if type(source) == VariableNode else [target_node.name] # the standard domain for message passing
-    if not target_node.name in source.received_messages: # forward pass
+    if not target.name in source.received_messages: # forward pass
+        domain = [source.name] if type(source) == VariableNode else [target.name] # standard message passing
         for var, vi in variableinfos.items():
-            if vi.neighbourcount > vi.counter: # don't send variables to subgraphs that do not depend on it
-                rd.append(var)
+            if var not in domain: # only uniques
+                domain.append(var)
+        return domain
     else: # backwards pass
-        m = source.received_messages[target_node.name]
-        for var in m.variableinfos.keys():
-            if not var in rd:
-                rd.append(var)
-    return list(set(rd)) # only uniques
+        return list(source.received_messages[target.name].func.domain.keys())
 
 def extended_message(source, target, ring):
     if not target in source.neighbours:
         raise Exception("Cannot create a message to a non-neighbour")
     f = unity(ring, OrderedDict([(source.name, source.domain)])) if type(source) == VariableNode else source.func
-    for s, m in source.received_messages.items():
-        if s == target:
+    for node, m in source.received_messages.items():
+        if node == target.name:
             continue
         f = merge(f, m.func, ring)
-    assignments = source.assignments
-    vis = updated_variableinfos(source, target)
-    rms = reduced_message_domain(source, target, vis)
-    if target.name in source.received_messages: # backwards pass
-        for m in source.received_messages.values():
-            for var, val in m.assignments.items():
-                assignments[var] = val
-                f = eliminate(f, ring, var, val)
-        f_total = merge(f, source.received_messages[target.name].func, ring)
-        for var, val in assignments.items():
-            f_total = eliminate(f, ring, var, val)
-        new_assignments = find_max(f_total)
-        for var, val in new_assignments.items():
-            if var in rms:
-                assignments[var] = val
-                f = eliminate(f, ring, var, val)
-    f = marginalize_others(f, ring, rms)
-    return Message(source, target, f, assignments, vis)
+    variableinfos = compute_variableinfos(source, target)
+    message_domain = extended_message_domain(source, target, variableinfos)
+    f = marginalize_others(f, ring, message_domain)
+    return Message(source, target, f, variableinfos)
 
 ############
 # Examples #
@@ -323,7 +323,7 @@ def extended_message(source, target, ring):
 # Introspected Functions
 ########################
 
-# ring = Ring(operator.add, 0, operator.mul, operator.truediv, 1) # plus-mul ()
+# ring = Ring(operator.add, 0, operator.mul, operator.truediv, 1) # plus-mul
 ring = Ring(max, float('-inf'), operator.add, operator.sub, 0) # max-plus
 
 def func1(x1, x2):
@@ -347,23 +347,9 @@ print_func_table(m)
 # Factor Graph
 ##############
 
-def variable_assignment(variablenode, ring):
+def variable_assignment(vn):
     "The assignment a variable shall take when message passing has finished"
-    for m in variablenode.received_messages.values():
-        if variablenode.name in m.assignments:
-            return m.assignments[variablenode.name]
-
-    f = unity(ring)
-    for m in variablenode.received_messages.values():
-        f = merge(f, m.func, ring)
-
-    for m in variablenode.received_messages.values():
-        for var, val in m.assignments.items():
-            if var in f.domain:
-                f = eliminate(f, ring, var, val)
-    f = marginalize_others(f, ring, variablenode.name)
-    ma = find_max(f)
-    return ma[variablenode.name]
+    return find_max(vn.marginal())[vn.name]
         
 def create_random_func(variables):
     results = {}
@@ -393,10 +379,10 @@ f56 = create_random_func([x5, x6])
 a56 = G.addFactorNode('a56', f56, [x5, x6])
 
 ## Closing the loop
-# f161 = create_random_func([x1, x6])
-# a161 = G.addFactorNode('a16^1', f161, x1, x6)
-# f166 = create_random_func([x1, x6])
-# a166 = G.addFactorNode('a16^6', f166, x6, x1)
+f161 = create_random_func([x1, x6])
+a161 = G.addFactorNode('a16^1', f161, x1, x6)
+f166 = create_random_func([x1, x6])
+a166 = G.addFactorNode('a16^6', f166, x6, x1)
 
 print("\n## Example for inference on a factor graph ##")
 running = True
@@ -405,8 +391,8 @@ while(running):
     for n in list(G.variables.values()) + list(G.factors.values()):
         t = n.get_target()
         if t:
-            m = G.message(n, t) # vanilla GDL messages for the non-loopy case
-            # m = extended_message(n, t, G.ring) # extended messages for loopy graphs with split factors
+            # m = G.message(n, t) # vanilla GDL messages for the non-loopy case
+            m = extended_message(n, t, G.ring) # extended messages for loopy graphs with split factors
             print(m)
             n.send(m)
             running = True
@@ -414,7 +400,7 @@ while(running):
 print("Max assignment found with message passing:")
 assignment = {}
 for vn in G.variables.values():
-    assignment[vn.name] = variable_assignment(vn, ring)
+    assignment[vn.name] = variable_assignment(vn)
 print(assignment)
 
 print("Max assignment found by brute force")
