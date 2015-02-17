@@ -66,7 +66,7 @@ if remote_neighbour_extension:
     while(running):
         running = False
         for n in list(G.variables.values()) + list(G.factors.values()):
-            t = n.get_message_target()
+            t = n.message_target()
             if t:
                 m = n.send(extended_message(n, t, G.ring, G.time()))
                 print(m)
@@ -76,32 +76,32 @@ if remote_neighbour_extension:
         assignment[vn.name] = max_assignment(vn)
 else: # loopy .. with output into file for graphing
     all_nodes = G.variables.values() + G.factors.values()
-    node_count = len(all_nodes)
     i = 0
-    c = 0
-    f = open('results'+str(s)+'.dat','w')
+    # c = 0
+    # f = open('results'+str(s)+'.dat','w')
     while i < 5000:
         for n in all_nodes:
             i = i+1
             for t in n.neighbours:
                 m = n.send_if_update(G.message(n, t))
-                if not m:
-                    continue
-                c = c+1
-                assignment = {}
-                for vn in G.variables.values():
-                    assignment[vn.name] = max_assignment(vn)
-                total = ring.one
-                for fn in G.factors.values():
-                    args = list(fn.func.domain.keys())
-                    for x in range(len(args)):
-                        args[x] = assignment[args[x]]
-                    total = ring.mul(total, fn.func(*args))
-                f.write(str(c) + " " + str(total) + "\n")
-    while c < 1000:
-        c = c+1
-        f.write(str(c) + " " + str(total) + "\n")
-    f.close()
+    ## file output for graphing
+    #             if not m:
+    #                 continue
+    #             c = c+1
+    #             assignment = {}
+    #             for vn in G.variables.values():
+    #                 assignment[vn.name] = max_assignment(vn)
+    #             total = ring.one
+    #             for fn in G.factors.values():
+    #                 args = list(fn.func.domain.keys())
+    #                 for x in range(len(args)):
+    #                     args[x] = assignment[args[x]]
+    #                 total = ring.mul(total, fn.func(*args))
+    #             f.write(str(c) + " " + str(total) + "\n")
+    # while c < 1000:
+    #     c = c+1
+    #     f.write(str(c) + " " + str(total) + "\n")
+    # f.close()
     assignment = {}
     for vn in G.variables.values():
         assignment[vn.name] = max_assignment(vn)

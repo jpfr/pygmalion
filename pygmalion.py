@@ -133,7 +133,7 @@ class Message(object):
         self.destination = destination
         self.func = func
         self.time = time
-        self.variableinfos = variableinfos # used only for the split-factor extension
+        self.variableinfos = variableinfos # used in the remote neighbour extension
 
     def __repr__(self):
         return "<Message: %s -> %s,\tDomain: [%s],\tVariableInfos: [%s]>" % \
@@ -141,6 +141,27 @@ class Message(object):
              ",".join(self.variableinfos.keys()))
 
 class Node(object):
+    def __init__(self, name, ring, neighbours=[], remote_neighbours=[]):
+        self.name = name
+        self.ring = ring
+        self.neighbours = neighbours[:]
+        self.remote_neighbours = remote_neighbours[:] # for the remote neighbours extension
+        self.received_messages = {}
+        self.last_send = {} # the last time a message was sent to a given neighbour
+
+    def message_target(self):
+        "A node can only send to a neighbour if it has not already sent to that \
+        neighbour and it has received messages from all other neighbours."
+        possible_targets = dict((n, len(self.neighbours)) for n in self.neighbours)
+        for received_from in self.received_messages.keys():
+            for target in possible_targets:
+                if received_from != target.name:
+                    possible_targets[target] -= 1
+        for pt, count in possible_targets.items():
+            if count == 1 and not self.name in pt.received_messages:
+                return pt
+        return None
+
     def send(self, message):
         recipient = message.destination
         self.last_send[recipient.name] = message.time
@@ -162,104 +183,60 @@ class Node(object):
                 return message
         return None
 
-    def reset(self):
-        self.received_messages = {}
-
-    def is_leaf(self):
-        if len(self.neighbours) == 1:
-            return True
-        return False
-
-    def get_message_target(self):
-        "A node can only send to a neighbour if it has not already sent to that \
-        neighbour and it has received messages from all other neighbours."
-        possible_targets = dict((n, len(self.neighbours)) for n in self.neighbours)
-        for received_from in self.received_messages.keys():
-            for target in possible_targets:
-                if received_from != target.name:
-                    possible_targets[target] -= 1
-        for pt, count in possible_targets.items():
-            if count == 1 and not self.name in pt.received_messages:
-                return pt
-        return None
-
-class VariableNode(Node):
-    def __init__(self, name, domain, ring, neighbours=[], remote_neighbours=[]):
-        self.name = name
-        self.domain = domain
-        self.ring = ring
-        self.neighbours = neighbours[:]
-        self.remote_neighbours = remote_neighbours[:] # only needed for the split factor extension
-        self.received_messages = {}
-        self.last_send = {} # target name -> send time
-        self.invkappa = 0
-
-    def __repr__(self):
-        return "<VariableNode: %s>" % self.name
-
     def marginal(self):
-        f = unity(self.ring)
+        f = unity(self.ring) if type(self) == VariableNode else self.func
         f.domain = OrderedDict({self.name : self.domain})
         for m in self.received_messages.values():
             f = merge(f, m.func, self.ring)
         f = marginalize_others(f, self.ring, self.name)
         return f
 
+    def reset(self):
+        self.received_messages = {}
+
+class VariableNode(Node):
+    def __init__(self, name, domain, ring, neighbours=[], remote_neighbours=[]):
+        super(VariableNode, self).__init__(name, ring, neighbours, remote_neighbours)
+        self.domain = domain
+
 class FactorNode(Node):
     def __init__(self, name, func, ring, neighbours=[], remote_neighbours=[]):
-        self.name = name
+        super(FactorNode, self).__init__(name, ring, neighbours, remote_neighbours)
         self.func = func
-        self.ring = ring
-        self.neighbours = neighbours[:]
-        self.remote_neighbours = remote_neighbours[:] # only used by the split factor extension
-        self.received_messages = {}
-        self.last_send = {} # target name -> send time
-        self.invkappa = 0
-
-    def __repr__(self):
-        return "<VariableNode: %s>" % self.name
-
-    def marginal(self):
-        "The marginal over the domain of the function"
-        f = self.func
-        for m in self.received_messages.values():
-            f = merge(f, m.func, self.ring)
-        f = marginalize_others(f, self.ring, self.func.domain.keys())
-        return f
 
 def create_timer():
     "A (non wall-time) timer that returns a monotonically increasing value. \
     Can also be used to count the sent message (globally)."
-    thistime = [0] # lists can be accessed from within a closure
+    thistime = [0] # lists can be accessed from within a closure, but not scalars
     def timer():
         thistime[0] += 1
         return thistime[0]
     return timer
 
 class FactorGraph(object):
-    def __init__(self, ring, variables = {}, factors = {}):
+    def __init__(self, ring, variables={}, factors={}):
         self.ring = ring
         self.variables = variables
         self.factors = factors
         self.time = create_timer()
 
     def addVariableNode(self, name, domain, neighbours=[], remote_neighbours=[]):
-        v = VariableNode(name, domain, self.ring)
-        self.variables[name] = v
-        self.connect(v, neighbours)
-        self.connect(v, remote_neighbours, True)
-        return v
+        vn = VariableNode(name, domain, self.ring)
+        self.variables[name] = vn
+        self.connect(vn, neighbours)
+        self.connect(vn, remote_neighbours, True)
+        return vn
 
     def addFactorNode(self, name, func, neighbours=[], remote_neighbours=[]):
-        v = FactorNode(name, func, self.ring)
-        self.factors[name] = v
-        self.connect(v, neighbours)
-        self.connect(v, remote_neighbours, True)
-        return v
+        fn = FactorNode(name, func, self.ring)
+        self.factors[name] = fn
+        self.connect(fn, neighbours)
+        self.connect(fn, remote_neighbours, True)
+        return fn
 
     def connect(self, a, b, remote=False):
         "Make an edge between two nodes or between a source and several neighbours."
-        if not isinstance(b, list):
+        if not type(b) == list:
             b = [b]
         for b_ in b:
             if remote:
@@ -276,19 +253,15 @@ class FactorGraph(object):
             fn.reset()    
 
     def message(self, source, target):
-        "Construct a message between the source and the target node"
-        if not target in source.neighbours:
-            raise Exception("Cannot create a message to a non-neighbour")
-        f = unity(self.ring, OrderedDict([(source.name, source.domain)])) if \
-            type(source) == VariableNode else source.func
+        f = unity(self.ring, OrderedDict([(source.name, source.domain)])) if type(source) == VariableNode else source.func
         for neighbour, m in source.received_messages.items():
             if neighbour == target.name:
                 continue
             f = merge(f, m.func, self.ring)
         f = marginalize_others(f, self.ring, target.name if source.name in self.factors else source.name)
         first_arg = tuple([f.domain[d][0] for d in f.domain.keys()])
-        source.invkappa = f(*first_arg)
-        f = normalize(f, self.ring, source.invkappa)
+        invkappa = f(*first_arg)
+        f = normalize(f, self.ring, invkappa)
         return Message(source, target, f, self.time())
 
     def merge_factors(self):
@@ -317,21 +290,16 @@ def updated_variableinfos(source, target):
     if source.name in vis:
         vis[source.name].visitcount += 1
     elif type(source) == VariableNode:
-        vis[source.name] = VariableInfo(source.name, len(source.remote_neighbours) + \
-                                        len(source.neighbours) + 1, 1)
+        vis[source.name] = VariableInfo(source.name, len(source.remote_neighbours) + len(source.neighbours) + 1, 1)
     for n in source.remote_neighbours + source.neighbours:
         if n.name in vis:
             vis[n.name].visitcount += 1
         elif type(source) == FactorNode:
-            vis[n.name] = VariableInfo(n.name, len(n.remote_neighbours) + \
-                                       len(n.neighbours) + 1, 1)
+            vis[n.name] = VariableInfo(n.name, len(n.remote_neighbours) + len(n.neighbours) + 1, 1)
     return dict(filter(lambda x: x[1].neighbourcount > x[1].visitcount, vis.items()))
 
 def extended_message(source, target, ring, time):
-    if not target in source.neighbours:
-        raise Exception("Cannot create a message to a non-neighbour")
-    f = unity(ring, OrderedDict([(source.name, source.domain)])) \
-        if type(source) == VariableNode else source.func
+    f = unity(ring, OrderedDict([(source.name, source.domain)])) if type(source) == VariableNode else source.func
     for node, m in source.received_messages.items():
         if node == target.name:
             continue
