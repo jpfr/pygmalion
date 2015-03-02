@@ -1,4 +1,5 @@
 from pygmalion import *
+from random import random, randint, seed
 
 # config
 s = 9

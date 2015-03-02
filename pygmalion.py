@@ -5,7 +5,6 @@ from collections import OrderedDict
 from itertools import product as iter_product
 from functools import reduce
 from tabulate import tabulate
-from random import random, randint, seed
 
 ##########################
 # Introspected Functions #
@@ -141,8 +140,9 @@ class Message(object):
              ",".join(self.variableinfos.keys()))
 
 class Node(object):
-    def __init__(self, name, ring, neighbours=[], remote_neighbours=[]):
+    def __init__(self, name, func, ring, neighbours=[], remote_neighbours=[]):
         self.name = name
+        self.func = func # if the node is a variable, func is unity (with the right domain)
         self.ring = ring
         self.neighbours = neighbours[:]
         self.remote_neighbours = remote_neighbours[:] # for the remote neighbours extension
@@ -184,8 +184,7 @@ class Node(object):
         return None
 
     def marginal(self):
-        f = unity(self.ring) if type(self) == VariableNode else self.func
-        f.domain = OrderedDict({self.name : self.domain})
+        f = self.func
         for m in self.received_messages.values():
             f = merge(f, m.func, self.ring)
         f = marginalize_others(f, self.ring, self.name)
@@ -196,13 +195,13 @@ class Node(object):
 
 class VariableNode(Node):
     def __init__(self, name, domain, ring, neighbours=[], remote_neighbours=[]):
-        super(VariableNode, self).__init__(name, ring, neighbours, remote_neighbours)
         self.domain = domain
+        func = unity(ring, OrderedDict([(name, domain)]))
+        super(VariableNode, self).__init__(name, func, ring, neighbours, remote_neighbours)
 
 class FactorNode(Node):
     def __init__(self, name, func, ring, neighbours=[], remote_neighbours=[]):
-        super(FactorNode, self).__init__(name, ring, neighbours, remote_neighbours)
-        self.func = func
+        super(FactorNode, self).__init__(name, func, ring, neighbours, remote_neighbours)
 
 def create_timer():
     "A (non wall-time) timer that returns a monotonically increasing value. \
@@ -253,19 +252,21 @@ class FactorGraph(object):
             fn.reset()    
 
     def message(self, source, target):
-        f = unity(self.ring, OrderedDict([(source.name, source.domain)])) if type(source) == VariableNode else source.func
+        f = source.func
         for neighbour, m in source.received_messages.items():
             if neighbour == target.name:
                 continue
             f = merge(f, m.func, self.ring)
-        f = marginalize_others(f, self.ring, target.name if source.name in self.factors else source.name)
+        message_domain = target.name if type(source) == FactorNode else source.name
+        f = marginalize_others(f, self.ring, message_domain)
         first_arg = tuple([f.domain[d][0] for d in f.domain.keys()])
         invkappa = f(*first_arg)
         f = normalize(f, self.ring, invkappa)
         return Message(source, target, f, self.time())
 
     def merge_factors(self):
-        return reduce(lambda f1, f2: merge(f1, f2, self.ring), [fn.func for fn in self.factors.values()])
+        return reduce(lambda f1, f2: merge(f1, f2, self.ring), \
+                      [fn.func for fn in self.factors.values()])
 
 ##############################
 # Remote Neighbour Extension #
@@ -290,16 +291,18 @@ def updated_variableinfos(source, target):
     if source.name in vis:
         vis[source.name].visitcount += 1
     elif type(source) == VariableNode:
-        vis[source.name] = VariableInfo(source.name, len(source.remote_neighbours) + len(source.neighbours) + 1, 1)
+        vis[source.name] = VariableInfo(source.name, len(source.remote_neighbours) + \
+                                        len(source.neighbours) + 1, 1)
     for n in source.remote_neighbours + source.neighbours:
         if n.name in vis:
             vis[n.name].visitcount += 1
         elif type(source) == FactorNode:
-            vis[n.name] = VariableInfo(n.name, len(n.remote_neighbours) + len(n.neighbours) + 1, 1)
+            vis[n.name] = VariableInfo(n.name, len(n.remote_neighbours) + \
+                                       len(n.neighbours) + 1, 1)
     return dict(filter(lambda x: x[1].neighbourcount > x[1].visitcount, vis.items()))
 
 def extended_message(source, target, ring, time):
-    f = unity(ring, OrderedDict([(source.name, source.domain)])) if type(source) == VariableNode else source.func
+    f = source.func
     for node, m in source.received_messages.items():
         if node == target.name:
             continue
